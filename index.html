@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Star Catcher</title>
+<style>
+/* Layout: one centered play column, HUD above the canvas, overlay for start and game over. Single dark night-sky look by choice. */
+:root {
+  --bg: #0d1226;
+  --panel: #171d3a;
+  --ink: #f4efe4;
+  --muted: #9aa3c7;
+  --star: #ffc94d;
+  --rock: #ff5d6c;
+  --accent: #5eead4;
+  --font-display: Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif;
+  --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  padding-block: 12px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.wrap { width: 100%; max-width: 440px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.hud { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; font-family: var(--font-display); }
+.hud .cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.hud .label { font-family: var(--font-body); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.hud .val { font-size: 26px; line-height: 1; font-variant-numeric: tabular-nums; }
+.hud .lives { color: var(--rock); letter-spacing: 0.08em; }
+.stage { position: relative; }
+canvas { display: block; width: 100%; height: auto; border-radius: 14px; background: var(--panel); touch-action: none; cursor: ew-resize; }
+.overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 24px; text-align: center; border-radius: 14px; background: rgba(13, 18, 38, 0.82);
+}
+.overlay[hidden] { display: none; }
+.overlay h1 { margin: 0; font-family: var(--font-display); font-size: 40px; line-height: 1; color: var(--star); text-wrap: balance; font-weight: 400; }
+.overlay p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.5; max-width: 30ch; }
+.overlay p strong { color: var(--ink); font-weight: 600; }
+button {
+  font-family: var(--font-display); font-size: 18px; letter-spacing: 0.04em; color: #0d1226; background: var(--star);
+  border: 0; border-radius: 10px; padding: 14px 28px; cursor: pointer; min-height: 48px;
+}
+button:hover { filter: brightness(1.08); }
+button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.hint { font-size: 13px; color: var(--muted); text-align: center; margin: 0; }
+@media (prefers-reduced-motion: reduce) { button { transition: none; } }
+</style>
+<!-- Add the YouTube Playables SDK script tag here once access is granted -->
+</head>
+<body>
+
+
+<div class="wrap">
+  <div class="hud">
+    <div class="cell"><span class="label">Score</span><span class="val" id="score">0</span></div>
+    <div class="cell"><span class="label">Best</span><span class="val" id="best">0</span></div>
+    <div class="cell"><span class="label">Lives</span><span class="val lives" id="lives">♥♥♥</span></div>
+  </div>
+  <div class="stage">
+    <canvas id="c" aria-label="Star Catcher game area"></canvas>
+    <div class="overlay" id="ov">
+      <h1 id="ovTitle">Star Catcher</h1>
+      <p id="ovText">Drag to move the basket. Catch the <strong>stars</strong>, dodge the <strong>rocks</strong>. Three hits and you're out.</p>
+      <button id="go" type="button">Play</button>
+    </div>
+  </div>
+  <p class="hint">Phone: drag your finger. Computer: move the mouse or use the arrow keys.</p>
+</div>
+
+<script>
+(function () {
+  var W = 360, H = 520;
+  var cv = document.getElementById('c');
+  var ctx = cv.getContext('2d');
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = W * dpr;
+  cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  var scoreEl = document.getElementById('score');
+  var bestEl = document.getElementById('best');
+  var livesEl = document.getElementById('lives');
+  var ov = document.getElementById('ov');
+  var ovTitle = document.getElementById('ovTitle');
+  var ovText = document.getElementById('ovText');
+  var goBtn = document.getElementById('go');
+
+  var state = 'ready';
+  var score = 0, best = 0, lives = 3;
+  var items = [], parts = [], spawnT = 0.6, shake = 0;
+  var player = { x: W / 2, w: 84, h: 18, y: H - 56 };
+  var target = W / 2;
+  var keys = { left: false, right: false };
+  var audio = null;
+  var paused = false;
+  var soundOn = true;
+
+  /* YouTube Playables SDK hooks. Everything is guarded, so the game also runs
+     as a normal web page. Add the official SDK script tag in <head> (before
+     this script) once you get access. */
+  var yt = (typeof ytgame !== 'undefined' && ytgame && ytgame.IN_PLAYABLES_ENV) ? ytgame : null;
+  function ytTry(fn) { try { return fn(); } catch (e) { return undefined; } }
+
+  function saveBest() {
+    if (yt) { ytTry(function () { return yt.game.saveData(JSON.stringify({ best: best })); }); return; }
+    try { localStorage.setItem('star-catcher-best', String(best)); } catch (e) {}
+  }
+  function loadBest() {
+    if (yt) {
+      Promise.resolve(ytTry(function () { return yt.game.loadData(); })).then(function (d) {
+        try { var v = JSON.parse(d || '{}').best; if (typeof v === 'number' && v > best) { best = v; hud(); } } catch (e) {}
+      }).catch(function () {});
+      return;
+    }
+    try { best = parseInt(localStorage.getItem('star-catcher-best') || '0', 10) || 0; } catch (e) {}
+  }
+  if (yt) {
+    ytTry(function () { yt.system.onPause(function () { paused = true; }); });
+    ytTry(function () { yt.system.onResume(function () { paused = false; last = performance.now(); }); });
+    ytTry(function () { soundOn = !!yt.system.isAudioEnabled(); });
+    ytTry(function () { yt.system.onAudioEnabledChange(function (on) { soundOn = !!on; }); });
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (!yt) paused = document.hidden;
+    if (!document.hidden) last = performance.now();
+  });
+
+  var bg = [];
+  for (var i = 0; i < 60; i++) {
+    bg.push({ x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.4 + 0.3, p: Math.random() * 6.28, s: 0.5 + Math.random() * 1.5 });
+  }
+
+  function hud() {
+    scoreEl.textContent = score;
+    bestEl.textContent = best;
+    var l = Math.max(lives, 0);
+    livesEl.textContent = new Array(l + 1).join('♥') + new Array(Math.max(3 - l, 0) + 1).join('♡');
+  }
+
+  function beep(freq, dur, type) {
+    if (!audio || !soundOn) return;
+    try {
+      var o = audio.createOscillator(), g = audio.createGain();
+      o.type = type || 'sine';
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.08, audio.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + dur);
+      o.connect(g); g.connect(audio.destination);
+      o.start(); o.stop(audio.currentTime + dur);
+    } catch (e) {}
+  }
+
+  function start() {
+    try {
+      if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+      if (audio.state === 'suspended') audio.resume();
+    } catch (e) { audio = null; }
+    score = 0; lives = 3; items = []; parts = []; spawnT = 0.6; shake = 0;
+    player.x = target = W / 2;
+    state = 'play';
+    ov.hidden = true;
+    hud();
+    goBtn.blur();
+  }
+
+  function over() {
+    state = 'over';
+    var isBest = score > best;
+    if (isBest) {
+      best = score;
+      saveBest();
+    }
+    if (yt) ytTry(function () { return yt.engagement.sendScore({ value: score }); });
+    hud();
+    ovTitle.textContent = isBest && score > 0 ? 'New best!' : 'Game over';
+    ovText.innerHTML = 'You caught <strong>' + score + '</strong> stars. Best is <strong>' + best + '</strong>.';
+    goBtn.textContent = 'Play again';
+    ov.hidden = false;
+    beep(160, 0.4, 'sawtooth');
+  }
+
+  function spawn() {
+    var rockChance = Math.min(0.4, 0.18 + score * 0.004);
+    var r = Math.random();
+    var type = r < rockChance ? 'rock' : (r > 0.95 ? 'gold' : 'star');
+    var speed = Math.min(340, 120 + score * 4) * (0.9 + Math.random() * 0.3);
+    var shape = [];
+    for (var i = 0; i < 8; i++) shape.push(0.7 + Math.random() * 0.4);
+    items.push({ x: 24 + Math.random() * (W - 48), y: -20, r: type === 'gold' ? 12 : 15, vy: speed, type: type, rot: Math.random() * 6.28, vr: (Math.random() - 0.5) * 3, shape: shape });
+  }
+
+  function burst(x, y, color, n) {
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * 6.28, s = 60 + Math.random() * 140;
+      parts.push({ x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: 0.5 + Math.random() * 0.3, max: 0.8, c: color });
+    }
+  }
+
+  function update(dt) {
+    if (keys.left) target -= 420 * dt;
+    if (keys.right) target += 420 * dt;
+    target = Math.max(player.w / 2, Math.min(W - player.w / 2, target));
+    player.x += (target - player.x) * Math.min(1, dt * 18);
+
+    if (state !== 'play') return;
+
+    spawnT -= dt;
+    if (spawnT <= 0) {
+      spawn();
+      spawnT = Math.max(0.35, 0.9 - score * 0.012);
+    }
+
+    for (var i = items.length - 1; i >= 0; i--) {
+      var it = items[i];
+      it.y += it.vy * dt;
+      it.rot += it.vr * dt;
+      var hitY = it.y + it.r >= player.y && it.y - it.r <= player.y + player.h;
+      var hitX = Math.abs(it.x - player.x) <= player.w / 2 + it.r * 0.5;
+      if (hitY && hitX) {
+        items.splice(i, 1);
+        if (it.type === 'rock') {
+          lives -= 1;
+          shake = 0.25;
+          burst(it.x, player.y, '#ff5d6c', 14);
+          beep(130, 0.25, 'square');
+          hud();
+          if (lives <= 0) { over(); return; }
+        } else {
+          var pts = it.type === 'gold' ? 5 : 1;
+          score += pts;
+          burst(it.x, player.y, it.type === 'gold' ? '#ffffff' : '#ffc94d', it.type === 'gold' ? 18 : 8);
+          beep(it.type === 'gold' ? 880 : 620, 0.12, 'triangle');
+          hud();
+        }
+      } else if (it.y - it.r > H) {
+        items.splice(i, 1);
+      }
+    }
+
+    for (var j = parts.length - 1; j >= 0; j--) {
+      var p = parts[j];
+      p.life -= dt;
+      if (p.life <= 0) { parts.splice(j, 1); continue; }
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt;
+    }
+    if (shake > 0) shake = Math.max(0, shake - dt);
+  }
+
+  function starPath(x, y, r, rot) {
+    ctx.beginPath();
+    for (var i = 0; i < 10; i++) {
+      var rad = i % 2 === 0 ? r : r * 0.45;
+      var a = rot + (Math.PI / 5) * i - Math.PI / 2;
+      var px = x + Math.cos(a) * rad, py = y + Math.sin(a) * rad;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  }
+
+  function draw(t) {
+    var g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0a0e20');
+    g.addColorStop(1, '#1d2552');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    if (shake > 0) ctx.translate((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
+
+    for (var i = 0; i < bg.length; i++) {
+      var b = bg[i];
+      ctx.globalAlpha = 0.35 + 0.35 * Math.sin(t / 1000 * b.s + b.p);
+      ctx.fillStyle = '#f4efe4';
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.28); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (var k = 0; k < items.length; k++) {
+      var it = items[k];
+      if (it.type === 'rock') {
+        ctx.beginPath();
+        for (var s = 0; s < it.shape.length; s++) {
+          var a = it.rot + (6.28 / it.shape.length) * s;
+          var rr = it.r * it.shape[s];
+          var px = it.x + Math.cos(a) * rr, py = it.y + Math.sin(a) * rr;
+          if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fillStyle = '#ff5d6c';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#7a1f2b';
+        ctx.stroke();
+      } else {
+        starPath(it.x, it.y, it.r, it.rot);
+        ctx.fillStyle = it.type === 'gold' ? '#ffffff' : '#ffc94d';
+        ctx.shadowColor = it.type === 'gold' ? '#ffffff' : '#ffc94d';
+        ctx.shadowBlur = 12;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    for (var q = 0; q < parts.length; q++) {
+      var p = parts[q];
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.c;
+      ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+
+    var bx = player.x - player.w / 2, by = player.y;
+    ctx.beginPath();
+    ctx.moveTo(bx - 4, by);
+    ctx.lineTo(bx + player.w + 4, by);
+    ctx.lineTo(bx + player.w - 8, by + player.h);
+    ctx.lineTo(bx + 8, by + player.h);
+    ctx.closePath();
+    ctx.fillStyle = '#5eead4';
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(bx, by, player.w, 3);
+
+    ctx.restore();
+  }
+
+  var last = performance.now();
+  function frame(now) {
+    var dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (!paused) update(dt);
+    draw(now);
+    if (!readySent) {
+      readySent = true;
+      if (yt) {
+        ytTry(function () { yt.game.firstFrameReady(); });
+        ytTry(function () { yt.game.gameReady(); });
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  var readySent = false;
+
+  function toX(e) {
+    var rect = cv.getBoundingClientRect();
+    return (e.clientX - rect.left) * (W / rect.width);
+  }
+  cv.addEventListener('pointermove', function (e) { target = toX(e); });
+  cv.addEventListener('pointerdown', function (e) { target = toX(e); });
+
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+    if (e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+    if ((e.key === 'Enter' || e.key === ' ') && state !== 'play' && document.activeElement !== goBtn) { e.preventDefault(); start(); }
+  });
+  window.addEventListener('keyup', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+  });
+
+  goBtn.addEventListener('click', start);
+  loadBest();
+  hud();
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
